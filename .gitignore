@@ -12,9 +12,6 @@ env/
 .idea/
 .vscode/
 
-# Local scratch workspace
-/草稿/
-
 # Logs and temporary files
 *.log
 *.tmp

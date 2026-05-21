@@ -1,0 +1,40 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE/editor local state
+.idea/
+.vscode/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# Local market data and generated research outputs
+level2_data/
+草稿/撤单/level2_data/
+草稿/撤单/cancel_minute_stock_tmp/
+草稿/撤单/因子缓存/
+cancel_minute_stock_tmp/
+因子缓存/
+
+# Data artifacts
+*.csv
+*.csv.gz
+*.parquet
+*.pkl
+*.pickle
+*.npy
+*.npz
+
+# Reference documents
+草稿/*.pdf

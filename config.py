@@ -1,31 +1,44 @@
 from __future__ import annotations
 
+import platform
 from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+IS_LINUX = platform.system().lower() == "linux"
 
 # =========================================
 # 输入数据路径
 # =========================================
 
-# Level-2 原始逐笔数据目录，目录结构约定为：
+if IS_LINUX:
+    # Linux 服务器路径。注意：这里按当前机器挂载约定配置，
+    # EOD 轴文件在 /mnt/ssd/fundmental，基本面股本文件在 /mnt/ssd/eod。
+    LEVEL2_DATA_DIR = Path("/mnt/ssd/fundmental")
+    EOD_DIR = Path("/mnt/ssd/fundmental")
+    FUNDAMENTAL_DIR = Path("/mnt/ssd/eod")
+    TRADABLE_NPY_PATH = Path("/home/luze/可交易股票.npy")
+else:
+    # Windows 本地路径。
+    LEVEL2_DATA_DIR = Path(r"D:\凯纳\原始数据\level2_data")
+    EOD_DIR = Path(r"D:\凯纳\原始数据\eod")
+    FUNDAMENTAL_DIR = Path(r"D:\凯纳\原始数据\fundmental")
+    TRADABLE_NPY_PATH = EOD_DIR / "可交易股票.npy"
+
+# Level-2 原始逐笔数据目录结构约定为：
 #   LEVEL2_DATA_DIR / YYYYMMDD / order/*.csv.gz
 #   LEVEL2_DATA_DIR / YYYYMMDD / trade/*.csv.gz
-LEVEL2_DATA_DIR = Path(r"D:\凯纳\原始数据\level2_data")
 
 # EOD 轴文件。所有输出因子 npy 都严格复用这里的股票轴和日期轴：
 #   shape = (len(ticker_names), len(dates))
-EOD_DIR = Path(r"D:\凯纳\原始数据\eod")
 TICKER_NAMES_NPY_PATH = EOD_DIR / "ticker_names.npy"
 DATES_NPY_PATH = EOD_DIR / "dates.npy"
-TRADABLE_NPY_PATH = EOD_DIR / "可交易股票.npy"
 
 # 三小将“撤单率”的分母：自由流通股本（股数口径）。
 # 该文件的股票轴和日期轴需要与 EOD 完全一致。
-FREE_FLOAT_SHARES_NPY_PATH = Path(r"D:\凯纳\原始数据\fundmental\CAPQ0_FLOAT_A_SHR.npy")
-FUNDAMENTAL_TICKER_NAMES_NPY_PATH = Path(r"D:\凯纳\原始数据\fundmental\ticker_names.npy")
-FUNDAMENTAL_DATES_NPY_PATH = Path(r"D:\凯纳\原始数据\fundmental\dates.npy")
+FREE_FLOAT_SHARES_NPY_PATH = FUNDAMENTAL_DIR / "CAPQ0_FLOAT_A_SHR.npy"
+FUNDAMENTAL_TICKER_NAMES_NPY_PATH = FUNDAMENTAL_DIR / "ticker_names.npy"
+FUNDAMENTAL_DATES_NPY_PATH = FUNDAMENTAL_DIR / "dates.npy"
 
 # =========================================
 # 输出路径
@@ -72,8 +85,10 @@ TIME_SEGMENTS = REPORT_AUCTION_SEGMENT
 
 __all__ = [
     "PROJECT_ROOT",
+    "IS_LINUX",
     "LEVEL2_DATA_DIR",
     "EOD_DIR",
+    "FUNDAMENTAL_DIR",
     "TICKER_NAMES_NPY_PATH",
     "DATES_NPY_PATH",
     "TRADABLE_NPY_PATH",

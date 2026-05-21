@@ -31,6 +31,28 @@ python build_report_factors.py
 
 输出目录为 `factor_outputs/report_reproduction/`。生成的 `.npy` 文件与 EOD 的 `ticker_names.npy`、`dates.npy` 轴完全一致。运行日志写入当前项目目录下的 `logs/build_report_factors.log`。
 
+## 路径配置
+
+`config.py` 会按操作系统自动切换数据路径。
+
+Windows 本地默认路径：
+
+```text
+Level-2: D:\凯纳\原始数据\level2_data
+EOD: D:\凯纳\原始数据\eod
+基本面: D:\凯纳\原始数据\fundmental
+可交易股票: D:\凯纳\原始数据\eod\可交易股票.npy
+```
+
+Linux 服务器默认路径：
+
+```text
+Level-2: /mnt/ssd/fundmental
+EOD: /mnt/ssd/fundmental
+基本面: /mnt/ssd/eod
+可交易股票: /home/luze/可交易股票.npy
+```
+
 ## build_report_factors.py 流程
 
 ### 1. 读取配置与轴信息

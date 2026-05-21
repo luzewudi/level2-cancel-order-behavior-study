@@ -634,24 +634,24 @@ def validate_axes(tickers: list[str], dates: list[str]) -> None:
     fund_tickers = [normalize_stock_code(x) for x in fund_tickers_raw]
     fund_dates = ["".join(ch for ch in _to_text(x) if ch.isdigit())[:8] for x in fund_dates_raw]
     if fund_tickers != tickers:
-        raise ValueError("fundamental ticker axis does not match EOD ticker axis")
+        raise ValueError("基本面股票轴与 EOD 股票轴不一致")
     if fund_dates != dates:
-        raise ValueError("fundamental date axis does not match EOD date axis")
+        raise ValueError("基本面日期轴与 EOD 日期轴不一致")
 
     free_float = np.load(config.FREE_FLOAT_SHARES_NPY_PATH, mmap_mode="r")
     tradable = np.load(config.TRADABLE_NPY_PATH, mmap_mode="r")
     expected = (len(tickers), len(dates))
     if free_float.shape != expected:
-        raise ValueError(f"free-float shape {free_float.shape} != {expected}")
+        raise ValueError(f"自由流通股本矩阵形状 {free_float.shape} 与 EOD 轴形状 {expected} 不一致")
     if tradable.shape != expected:
-        raise ValueError(f"tradable shape {tradable.shape} != {expected}")
+        raise ValueError(f"可交易股票矩阵形状 {tradable.shape} 与 EOD 轴形状 {expected} 不一致")
 
 
 def scan_dates(date_filter: set[str] | None = None) -> list[str]:
     """扫描 Level-2 目录中可处理的交易日。"""
 
     if not config.LEVEL2_DATA_DIR.exists():
-        raise FileNotFoundError(f"LEVEL2_DATA_DIR does not exist: {config.LEVEL2_DATA_DIR}")
+        raise FileNotFoundError(f"Level-2 数据目录不存在：{config.LEVEL2_DATA_DIR}")
     dates: list[str] = []
     for path in config.LEVEL2_DATA_DIR.iterdir():
         if not path.is_dir() or not path.name.isdigit() or len(path.name) != 8:
@@ -736,7 +736,7 @@ def build_roll_outputs(names: list[str], raw_dir: Path, output_root: Path, shape
         for name in tqdm(names, desc=f"生成 roll{window}", dynamic_ncols=True):
             src = np.load(raw_dir / f"{name}.npy", mmap_mode="r")
             if src.shape != shape:
-                raise ValueError(f"{name}.npy shape {src.shape} != {shape}")
+                raise ValueError(f"{name}.npy 矩阵形状 {src.shape} 与 EOD 轴形状 {shape} 不一致")
             rolling_nanmean_fixed_window(src, window, roll_dir / f"{name}.npy")
 
 
@@ -813,9 +813,9 @@ def dry_run_report(results: list[StockResult]) -> None:
 
     for result in results:
         logger.info(
-            f"{result.stock_code}: orders={result.order_count}, "
-            f"cancel_events={result.cancel_event_count}, negatives={result.negative_order_count}, "
-            f"tox={result.tox_5s_count}/{result.tox_30s_count}"
+            f"{result.stock_code}: 原始委托数={result.order_count}, "
+            f"主动撤单事件数={result.cancel_event_count}, 废单数={result.negative_order_count}, "
+            f"毒流动性计数={result.tox_5s_count}/{result.tox_30s_count}"
         )
         shown = 0
         for key in sorted(result.volumes):
@@ -825,7 +825,7 @@ def dry_run_report(results: list[StockResult]) -> None:
                 if shown >= 12:
                     remaining = sum(1 for v in result.volumes.values() if v != 0) - shown
                     if remaining > 0:
-                        logger.info(f"  ... {remaining} more non-zero volume buckets")
+                        logger.info(f"  ... 还有 {remaining} 个非零订单量分桶未展示")
                     break
 
 
@@ -919,7 +919,7 @@ def main() -> None:
 
     process_dates = [date for date in scan_dates(requested_dates) if date in date_to_idx]
     if not process_dates:
-        raise ValueError("no Level-2 dates matched the requested filters and EOD axis")
+        raise ValueError("没有 Level-2 交易日同时满足筛选条件和 EOD 日期轴")
     logger.info(f"待处理交易日数={len(process_dates)}: {process_dates[:10]}")
 
     tradable = np.load(config.TRADABLE_NPY_PATH, mmap_mode="r")

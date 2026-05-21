@@ -13,6 +13,7 @@ env/
 .vscode/
 
 # Logs and temporary files
+logs/
 *.log
 *.tmp
 *.temp
@@ -21,6 +22,7 @@ Thumbs.db
 
 # Local market data and generated research outputs
 level2_data/
+factor_outputs/
 cancel_minute_stock_tmp/
 因子缓存/
 

@@ -35,6 +35,3 @@ cancel_minute_stock_tmp/
 *.pickle
 *.npy
 *.npz
-
-# Reference documents
-草稿/*.pdf

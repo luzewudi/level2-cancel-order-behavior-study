@@ -12,6 +12,9 @@ env/
 .idea/
 .vscode/
 
+# Local scratch workspace
+/草稿/
+
 # Logs and temporary files
 *.log
 *.tmp
@@ -21,9 +24,6 @@ Thumbs.db
 
 # Local market data and generated research outputs
 level2_data/
-草稿/撤单/level2_data/
-草稿/撤单/cancel_minute_stock_tmp/
-草稿/撤单/因子缓存/
 cancel_minute_stock_tmp/
 因子缓存/
 

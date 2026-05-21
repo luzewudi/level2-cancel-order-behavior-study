@@ -122,7 +122,7 @@ order 表会被整理成 `base_orders`，即每个 `order_id` 一行的原始委
 - 8 位 `HHMMSSmmm`，例如 `91500120` 表示 `09:15:00.120`
 - 9 位 `HHMMSSmmm`，例如 `130000000` 表示 `13:00:00.000`
 
-如果遇到 UTC 纳秒时间戳，也会转成北京时间当日时间。
+脚本会统一转成“日内毫秒数”，例如 `09:15:00.120` 会变成 `33300120`。如果遇到 UTC epoch 纳秒时间戳，也会先转成北京时间，再取对应的日内毫秒数。
 
 ### 5. 汇总成交量
 
@@ -164,9 +164,9 @@ order 表会被整理成 `base_orders`，即每个 `order_id` 一行的原始委
 
 - `order_id`
 - `cancel_volume`
-- `cancel_time`
+- `cancel_time_ms`
 - `direction`
-- `orig_time`
+- `orig_time_ms`
 
 ### 7. 区分全撤、部撤、废单
 
@@ -187,9 +187,9 @@ order 表会被整理成 `base_orders`，即每个 `order_id` 一行的原始委
 
 ### 8. 归属时间段
 
-全撤和部撤使用撤单发生时间 `cancel_time` 归属时间段。
+全撤和部撤使用撤单发生时间 `cancel_time_ms` 归属时间段。
 
-废单没有撤单时间，因此使用原始委托时间 `orig_time` 归属时间段。
+废单没有撤单时间，因此使用原始委托时间 `orig_time_ms` 归属时间段。
 
 时间段由 `config.TIME_SEGMENTS` 控制。默认只有：
 
@@ -235,7 +235,7 @@ sell_tri = mean(sell_all_cancel_rate, sell_part_cancel_rate, sell_negative_rate)
 对每条主动撤单事件计算：
 
 ```text
-delta = cancel_time - orig_time
+delta_ms = cancel_time_ms - orig_time_ms
 ```
 
 然后统计：

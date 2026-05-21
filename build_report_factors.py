@@ -37,10 +37,9 @@ if hasattr(sys.stderr, "reconfigure"):
 logger = get_logger("build_report_factors")
 
 
-NS_PER_MS = 1_000_000
-NS_PER_SECOND = 1_000_000_000
-NS_PER_DAY = 24 * 60 * 60 * NS_PER_SECOND
-LOCAL_OFFSET_NS = 8 * 60 * 60 * NS_PER_SECOND
+MS_PER_SECOND = 1_000
+MS_PER_DAY = 24 * 60 * 60 * MS_PER_SECOND
+LOCAL_OFFSET_MS = 8 * 60 * 60 * MS_PER_SECOND
 
 CANCEL_STATUS_CODES = {"Cancelled", "Cancel", "8", "4"}
 DIRECTIONS = ("buy", "sell")
@@ -200,9 +199,9 @@ def time_ms_expr(column: str) -> pl.Expr:
     - 8 位：例如 91500120，表示 09:15:00.120；
     - 9 位：例如 130000000，表示 13:00:00.000。
 
-    这两种本质都是 HHMMSSmmm，只是 09 点没有前导 0。公式直接按整数拆
-    HH/MM/SS/ms，因此同时兼容 8 位和 9 位。若遇到 UTC 纳秒时间戳，则先
-    转为北京时间当日毫秒。
+    这两种本质都是 HHMMSSmmm，只是 09 点没有前导 0。函数会统一转成“日内毫秒数”，
+    例如 09:15:00.120 会转成 33300120。若遇到 UTC epoch 纳秒时间戳，则先转成
+    北京时间，再取对应的日内毫秒数。
     """
 
     raw = pl.col(column).cast(pl.Int64, strict=False)
@@ -212,18 +211,8 @@ def time_ms_expr(column: str) -> pl.Expr:
     ss = (raw.abs() // 1000) % 100
     ms = raw.abs() % 1000
     hms_ms = ((hh * 60 + mm) * 60 + ss) * 1000 + ms
-    epoch_local_ms = ((raw + LOCAL_OFFSET_NS) % NS_PER_DAY) // NS_PER_MS
+    epoch_local_ms = ((raw // 1_000_000) + LOCAL_OFFSET_MS) % MS_PER_DAY
     return pl.when(raw.is_null()).then(None).when(is_epoch_ns).then(epoch_local_ms).otherwise(hms_ms)
-
-
-def time_ns_expr(column: str) -> pl.Expr:
-    """把时间列转为纳秒刻度，用于计算撤单生命周期 delta。"""
-
-    raw = pl.col(column).cast(pl.Int64, strict=False)
-    is_epoch_ns = raw.abs() >= 1_000_000_000_000
-    return pl.when(raw.is_null()).then(None).when(is_epoch_ns).then(raw).otherwise(
-        time_ms_expr(column) * NS_PER_MS
-    )
 
 
 def direction_expr(column: str = "direction") -> pl.Expr:
@@ -275,7 +264,6 @@ def prepare_orders(order_df: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
             else pl.lit(np.nan).alias("order_price"),
             direction_expr("direction").alias("direction_norm"),
             time_ms_expr("order_time").alias("order_time_ms"),
-            time_ns_expr("order_time").alias("order_time_ns"),
         ]
     )
 
@@ -292,7 +280,7 @@ def prepare_orders(order_df: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
 
     base_orders = (
         base_candidates.filter(pl.col("order_id").is_not_null())
-        .sort(["order_id", "order_time_ns"])
+        .sort(["order_id", "order_time_ms"])
         .group_by("order_id", maintain_order=False)
         .agg(
             [
@@ -300,7 +288,6 @@ def prepare_orders(order_df: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
                 pl.first("order_volume").alias("orig_volume"),
                 pl.first("order_price").alias("orig_price"),
                 pl.first("order_time_ms").alias("orig_time_ms"),
-                pl.first("order_time_ns").alias("orig_time_ns"),
             ]
         )
     )
@@ -359,9 +346,8 @@ def cancel_events_from_trade(trade_df: pl.DataFrame | None, base_orders: pl.Data
         "order_id": pl.Int64,
         "cancel_volume": pl.Float64,
         "cancel_time_ms": pl.Int64,
-        "cancel_time_ns": pl.Int64,
         "direction": pl.Utf8,
-        "orig_time_ns": pl.Int64,
+        "orig_time_ms": pl.Int64,
     }
     if trade_df is None or trade_df.is_empty() or {"buy_id", "sell_id", "volume"} - set(trade_df.columns):
         return pl.DataFrame(schema=schema)
@@ -372,7 +358,6 @@ def cancel_events_from_trade(trade_df: pl.DataFrame | None, base_orders: pl.Data
             pl.col("sell_id").cast(pl.Int64, strict=False).alias("sell_id"),
             pl.col("volume").cast(pl.Float64, strict=False).alias("cancel_volume"),
             time_ms_expr("trade_time").alias("cancel_time_ms"),
-            time_ns_expr("trade_time").alias("cancel_time_ns"),
         ]
     )
     exec_cancel = (
@@ -390,8 +375,8 @@ def cancel_events_from_trade(trade_df: pl.DataFrame | None, base_orders: pl.Data
     )
     return (
         cancel_rows.filter(pl.col("order_id") > 0)
-        .select("order_id", "cancel_volume", "cancel_time_ms", "cancel_time_ns")
-        .join(base_orders.select("order_id", "direction", "orig_time_ns"), on="order_id", how="left")
+        .select("order_id", "cancel_volume", "cancel_time_ms")
+        .join(base_orders.select("order_id", "direction", "orig_time_ms"), on="order_id", how="left")
         .filter(pl.col("direction").is_not_null())
     )
 
@@ -408,9 +393,8 @@ def cancel_events_from_order(cancel_candidates: pl.DataFrame, base_orders: pl.Da
         "order_id": pl.Int64,
         "cancel_volume": pl.Float64,
         "cancel_time_ms": pl.Int64,
-        "cancel_time_ns": pl.Int64,
         "direction": pl.Utf8,
-        "orig_time_ns": pl.Int64,
+        "orig_time_ms": pl.Int64,
     }
     if cancel_candidates.is_empty():
         return pl.DataFrame(schema=schema)
@@ -421,15 +405,14 @@ def cancel_events_from_order(cancel_candidates: pl.DataFrame, base_orders: pl.Da
             pl.col("order_volume").cast(pl.Float64, strict=False).alias("cancel_volume"),
             pl.col("direction_norm").alias("cancel_direction"),
             pl.col("order_time_ms").alias("cancel_time_ms"),
-            pl.col("order_time_ns").alias("cancel_time_ns"),
         ]
     )
     return (
         cancel_rows.filter(pl.col("order_id").is_not_null())
-        .select("order_id", "cancel_volume", "cancel_time_ms", "cancel_time_ns", "cancel_direction")
-        .join(base_orders.select("order_id", "direction", "orig_time_ns"), on="order_id", how="left")
+        .select("order_id", "cancel_volume", "cancel_time_ms", "cancel_direction")
+        .join(base_orders.select("order_id", "direction", "orig_time_ms"), on="order_id", how="left")
         .with_columns(pl.coalesce(["direction", "cancel_direction"]).alias("direction"))
-        .select("order_id", "cancel_volume", "cancel_time_ms", "cancel_time_ns", "direction", "orig_time_ns")
+        .select("order_id", "cancel_volume", "cancel_time_ms", "direction", "orig_time_ms")
         .filter(pl.col("direction").is_not_null())
     )
 
@@ -516,7 +499,7 @@ def process_stock_task(task: tuple[str, str, str, str]) -> StockResult:
                     .then(pl.lit("part_cancel"))
                     .otherwise(pl.lit("all_cancel"))
                     .alias("kind"),
-                    (pl.col("cancel_time_ns") - pl.col("orig_time_ns")).alias("delta_ns"),
+                    (pl.col("cancel_time_ms") - pl.col("orig_time_ms")).alias("delta_ms"),
                 ]
             )
         )
@@ -541,15 +524,15 @@ def process_stock_task(task: tuple[str, str, str, str]) -> StockResult:
         tox_counts = cancel_events.select(
             [
                 (
-                    (pl.col("delta_ns") >= 0)
-                    & (pl.col("delta_ns") <= 5 * NS_PER_SECOND)
+                    (pl.col("delta_ms") >= 0)
+                    & (pl.col("delta_ms") <= 5 * MS_PER_SECOND)
                 )
                 .cast(pl.Int64)
                 .sum()
                 .alias("tox_5"),
                 (
-                    (pl.col("delta_ns") >= 0)
-                    & (pl.col("delta_ns") <= 30 * NS_PER_SECOND)
+                    (pl.col("delta_ms") >= 0)
+                    & (pl.col("delta_ms") <= 30 * MS_PER_SECOND)
                 )
                 .cast(pl.Int64)
                 .sum()
@@ -676,7 +659,7 @@ def initialize_memmaps(names: list[str], shape: tuple[int, int], output_dir: Pat
     output_dir.mkdir(parents=True, exist_ok=True)
     arrays: dict[str, np.memmap] = {}
     logger.info(f"初始化 raw 因子文件：count={len(names)}, shape={shape}, dir={output_dir}")
-    for name in tqdm(names, desc="初始化 raw npy", dynamic_ncols=True):
+    for name in names:
         arr = open_memmap(output_dir / f"{name}.npy", mode="w+", dtype=np.float64, shape=shape)
         for start in range(0, shape[0], 128):
             arr[start : start + 128, :] = np.nan

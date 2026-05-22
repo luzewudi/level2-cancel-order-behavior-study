@@ -339,7 +339,7 @@ def cancel_events_from_trade(trade_df: pl.DataFrame | None, base_orders: pl.Data
     """从 trade 表提取深交所主动撤单事件。
 
     深交所撤单通常记录在 trade 表中，buy_id 或 sell_id 为 -1，另一侧才是真正
-    被撤的 order_id。提取后立即 join base_orders，带出原始委托时间和方向。
+    被撤的 order_id。提取后立即 join base_orders，带出原始委托量、原始委托时间和方向。
     """
 
     schema = {
@@ -347,6 +347,7 @@ def cancel_events_from_trade(trade_df: pl.DataFrame | None, base_orders: pl.Data
         "cancel_volume": pl.Float64,
         "cancel_time_ms": pl.Int64,
         "direction": pl.Utf8,
+        "orig_volume": pl.Float64,
         "orig_time_ms": pl.Int64,
     }
     if trade_df is None or trade_df.is_empty() or {"buy_id", "sell_id", "volume"} - set(trade_df.columns):
@@ -376,7 +377,11 @@ def cancel_events_from_trade(trade_df: pl.DataFrame | None, base_orders: pl.Data
     return (
         cancel_rows.filter(pl.col("order_id") > 0)
         .select("order_id", "cancel_volume", "cancel_time_ms")
-        .join(base_orders.select("order_id", "direction", "orig_time_ms"), on="order_id", how="left")
+        .join(
+            base_orders.select("order_id", "direction", "orig_volume", "orig_time_ms"),
+            on="order_id",
+            how="left",
+        )
         .filter(pl.col("direction").is_not_null())
     )
 
@@ -394,6 +399,7 @@ def cancel_events_from_order(cancel_candidates: pl.DataFrame, base_orders: pl.Da
         "cancel_volume": pl.Float64,
         "cancel_time_ms": pl.Int64,
         "direction": pl.Utf8,
+        "orig_volume": pl.Float64,
         "orig_time_ms": pl.Int64,
     }
     if cancel_candidates.is_empty():
@@ -410,9 +416,13 @@ def cancel_events_from_order(cancel_candidates: pl.DataFrame, base_orders: pl.Da
     return (
         cancel_rows.filter(pl.col("order_id").is_not_null())
         .select("order_id", "cancel_volume", "cancel_time_ms", "cancel_direction")
-        .join(base_orders.select("order_id", "direction", "orig_time_ms"), on="order_id", how="left")
+        .join(
+            base_orders.select("order_id", "direction", "orig_volume", "orig_time_ms"),
+            on="order_id",
+            how="left",
+        )
         .with_columns(pl.coalesce(["direction", "cancel_direction"]).alias("direction"))
-        .select("order_id", "cancel_volume", "cancel_time_ms", "direction", "orig_time_ms")
+        .select("order_id", "cancel_volume", "cancel_time_ms", "direction", "orig_volume", "orig_time_ms")
         .filter(pl.col("direction").is_not_null())
     )
 

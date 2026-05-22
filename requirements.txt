@@ -1,0 +1,10 @@
+# Python 3.11 environment used for the current successful runs.
+
+# Core runtime dependencies for build_report_factors.py
+numpy==2.1.3
+polars==1.36.1
+tqdm==4.67.1
+colorama==0.4.6
+
+# Analysis/draft compatibility
+pandas==2.2.3

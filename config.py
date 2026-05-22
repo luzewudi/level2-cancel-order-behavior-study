@@ -13,10 +13,11 @@ IS_LINUX = platform.system().lower() == "linux"
 
 if IS_LINUX:
     # Linux 服务器路径。注意：这里按当前机器挂载约定配置，
-    # EOD 轴文件在 /mnt/ssd/fundmental，基本面股本文件在 /mnt/ssd/eod。
-    LEVEL2_DATA_DIR = Path("/mnt/ssd/fundmental")
-    EOD_DIR = Path("/mnt/ssd/fundmental")
-    FUNDAMENTAL_DIR = Path("/mnt/ssd/eod")
+    # Level-2 原始逐笔数据在 /shared/FactorBank/raw，
+    # EOD 轴文件在 /mnt/ssd/eod，自由流通股本文件在 /mnt/ssd/fundmental。
+    LEVEL2_DATA_DIR = Path("/shared/FactorBank/raw")
+    EOD_DIR = Path("/mnt/ssd/eod")
+    FUNDAMENTAL_DIR = Path("/mnt/ssd/fundmental")
     TRADABLE_NPY_PATH = Path("/home/luze/可交易股票.npy")
 else:
     # Windows 本地路径。

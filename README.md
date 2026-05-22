@@ -55,9 +55,9 @@ EOD: D:\凯纳\原始数据\eod
 Linux 服务器默认路径：
 
 ```text
-Level-2: /mnt/ssd/fundmental
-EOD: /mnt/ssd/fundmental
-基本面: /mnt/ssd/eod
+Level-2: /shared/FactorBank/raw
+EOD: /mnt/ssd/eod
+基本面: /mnt/ssd/fundmental
 可交易股票: /home/luze/可交易股票.npy
 ```
 

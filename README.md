@@ -23,6 +23,14 @@ TIME_SEGMENTS = ALL_7_TIME_SEGMENTS
 python build_report_factors.py --dates 20240226 --stocks 000001,600000 --dry-run --n-jobs 2
 ```
 
+在 PyCharm 里打断点调试时，建议把并行进程数设为 1，并先使用 `--dry-run`：
+
+```bash
+python build_report_factors.py --dates 20240226 --stocks 000001 --dry-run --n-jobs 1
+```
+
+这样 worker 会在当前进程内顺序执行，断点更稳定，也不会写出完整 EOD 形状的 `.npy` 文件。
+
 全量生成 raw、5日均值、20日均值：
 
 ```bash
@@ -113,9 +121,9 @@ EOD: /mnt/ssd/fundmental
 order 表会被整理成 `base_orders`，即每个 `order_id` 一行的原始委托信息：
 
 - 买卖方向
-- 原始委托量
+- 原始委托量 `orig_volume`
 - 原始委托价格
-- 原始委托时间
+- 原始委托时间 `orig_time_ms`
 
 时间字段兼容两种格式：
 
@@ -142,6 +150,14 @@ order 表会被整理成 `base_orders`，即每个 `order_id` 一行的原始委
 
 这个字段用于判断订单是否发生过成交。
 
+`trade_volume` 的单位是“股”，不是“手”。买入委托通常是 100 股整数倍，但卖出委托可能包含零股；同一个订单的累计成交量也可能因为部分成交、零股卖出而不是 100 的整数倍。对于发生撤单的订单，常见验算关系是：
+
+```text
+orig_volume = trade_volume + sum(cancel_volume)
+```
+
+如果同一个 `order_id` 有多条撤单记录，需要先把 `cancel_volume` 按 `order_id` 汇总后再验算。
+
 ### 6. 提取主动撤单
 
 主动撤单的提取方式按交易所区分。
@@ -166,7 +182,15 @@ order 表会被整理成 `base_orders`，即每个 `order_id` 一行的原始委
 - `cancel_volume`
 - `cancel_time_ms`
 - `direction`
+- `orig_volume`
 - `orig_time_ms`
+
+随后主动撤单事件会再与 `trade_volume` 合并，生成调试时常看的中间列：
+
+- `trade_volume`: 该 `order_id` 当日已成交股数
+- `segment`: 撤单发生时间命中的配置时间段
+- `kind`: `all_cancel` 或 `part_cancel`
+- `delta_ms`: `cancel_time_ms - orig_time_ms`，用于毒流动性计算
 
 ### 7. 区分全撤、部撤、废单
 
@@ -197,6 +221,20 @@ order 表会被整理成 `base_orders`，即每个 `order_id` 一行的原始委
 
 如需七段，可改成 `ALL_7_TIME_SEGMENTS`。
 
+`segment = null` 只表示该记录没有命中当前配置的时间段，不一定表示它不在交易时间内。默认只跑 `09:15-09:20` 时，`09:30` 之后的连续竞价撤单都会是 `null`；改成七段后，这些记录会落入 `cont1`、`cont2` 等时间段。
+
+七段命名含义如下：
+
+- `auction1_0915_0920`: 开盘集合竞价第一段，09:15-09:20
+- `auction2_0920_0925`: 开盘集合竞价第二段，09:20-09:25
+- `cont1_0930_1030`: 连续竞价第一段，09:30-10:30
+- `cont2_1030_1130`: 连续竞价第二段，10:30-11:30
+- `cont3_1300_1400`: 连续竞价第三段，13:00-14:00
+- `cont4_1400_1457`: 连续竞价第四段，14:00-14:57
+- `auction3_1457_1500`: 收盘集合竞价，14:57-15:00
+
+`09:15-09:20` 是集合竞价早段，可以申报也可以撤单，但还没有正式连续撮合，因此部撤数据可能很少，甚至某些股票某些天只有全撤或没有有效记录。
+
 ### 9. 计算三小将因子
 
 脚本同时计算买入方向和卖出方向。
@@ -215,6 +253,22 @@ order 表会被整理成 `base_orders`，即每个 `order_id` 一行的原始委
 ```text
 分类撤单率 = 分类委托量 / CAPQ0_FLOAT_A_SHR
 ```
+
+全撤和部撤的中间聚合结果先存在 `grouped` 里，再按命名规则写入 `volumes` 字典。例如：
+
+```text
+direction = buy
+kind = all_cancel
+segment = auction1_0915_0920
+```
+
+会写成：
+
+```text
+volumes["buy_all_cancel_rate_auction1_0915_0920"]
+```
+
+废单不来自 `cancel_events`，而是在后续的 `negative_orders` 中单独按 `orig_time_ms` 归属时间段后写入同一个 `volumes` 字典。
 
 每个时间段还会生成 2 个合成因子：
 
@@ -294,6 +348,28 @@ raw 因子写完后，脚本会生成：
 - `tox_5s_over_30s = 1`
 
 每个 raw 文件都会有对应的 roll5 和 roll20 文件。
+
+文件命名规则如下：
+
+```text
+{direction}_{kind}_rate_{segment}.npy
+```
+
+- `direction`: `buy` 或 `sell`
+- `kind`: `all_cancel`、`part_cancel` 或 `negative`
+- `segment`: `auction1_0915_0920`、`cont1_0930_1030` 等时间段名
+
+例如 `buy_all_cancel_rate_auction1_0915_0920.npy` 表示 09:15-09:20 内买入方向全撤订单量除以自由流通股本。
+
+合成因子命名为：
+
+```text
+{direction}_tri_{segment}.npy
+```
+
+例如 `sell_tri_auction1_0915_0920.npy` 是卖出方向全撤、部撤、废单三个原始因子的等权平均。
+
+`tox_5s_over_30s.npy` 不按方向和时间段拆分，表示全日主动撤单中 5 秒内撤单数量除以 30 秒内撤单数量。
 
 目录结构：
 

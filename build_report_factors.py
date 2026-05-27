@@ -44,6 +44,17 @@ LOCAL_OFFSET_MS = 8 * 60 * 60 * MS_PER_SECOND
 CANCEL_STATUS_CODES = {"Cancelled", "Cancel", "8", "4"}
 DIRECTIONS = ("buy", "sell")
 CANCEL_KINDS = ("all_cancel", "part_cancel", "negative")
+LEVEL2_PARQUET_CACHE_DIR = config.PROJECT_ROOT / "cache" / "level2_parquet"
+ORDER_READ_COLUMNS = [
+    "order_id",
+    "direction",
+    "volume",
+    "order_time",
+    "price",
+    "status",
+    "stock_exchange",
+]
+TRADE_READ_COLUMNS = ["buy_id", "sell_id", "volume", "trade_time", "exec_type"]
 
 
 @dataclass(frozen=True)
@@ -132,23 +143,45 @@ def factor_names() -> list[str]:
     return names
 
 
-def read_csv_auto(path: Path) -> pl.DataFrame:
+def _csv_header_columns(path: Path) -> list[str]:
+    """快速读取 CSV 表头，用于只解析后续计算需要的列。"""
+
+    if path.name.endswith(".gz"):
+        with gzip.open(path, mode="rt", encoding="utf-8", errors="replace", newline="") as handle:
+            header = handle.readline()
+    else:
+        with path.open(mode="r", encoding="utf-8", errors="replace", newline="") as handle:
+            header = handle.readline()
+    return [name.strip().strip('"') for name in header.strip().split(",") if name.strip()]
+
+
+def read_csv_auto(path: Path, columns: list[str] | None = None) -> pl.DataFrame:
     """读取 csv/csv.gz，优先 UTF-8，失败后回退 gb18030。
 
-    这里不直接把 gzip 文件路径交给 Polars 加 encoding 参数，是因为部分 Polars
-    版本会先按文本解码 gzip 二进制头，导致 0x8b 解码错误。显式 gzip.open 成
-    文本流后再交给 Polars 更稳。
+    优先把路径直接交给 Polars，让 Polars 原生完成 gzip 解压和 CSV 解析；
+    这比 Python gzip 文本流快很多。若遇到个别编码/压缩兼容问题，再回退到
+    原来的显式文本流读取方式。
     """
 
+    selected_columns = columns
+    if columns is not None:
+        header_columns = set(_csv_header_columns(path))
+        selected_columns = [column for column in columns if column in header_columns]
+
     last_error: Exception | None = None
+    try:
+        return pl.read_csv(path, infer_schema_length=1000, columns=selected_columns)
+    except Exception as native_error:
+        last_error = native_error
+
     for encoding, errors in (("utf-8", "strict"), ("gb18030", "replace")):
         handle = None
         try:
             if path.name.endswith(".gz"):
                 handle = gzip.open(path, mode="rt", encoding=encoding, errors=errors)
-                return pl.read_csv(handle, infer_schema_length=1000)
+                return pl.read_csv(handle, infer_schema_length=1000, columns=selected_columns)
             handle = path.open(mode="r", encoding=encoding, errors=errors)
-            return pl.read_csv(handle, infer_schema_length=1000)
+            return pl.read_csv(handle, infer_schema_length=1000, columns=selected_columns)
         except Exception as exc:  # noqa: PERF203
             last_error = exc
         finally:
@@ -158,22 +191,49 @@ def read_csv_auto(path: Path) -> pl.DataFrame:
     raise last_error
 
 
+def read_level2_table(path: Path, columns: list[str]) -> pl.DataFrame:
+    """读取单个 Level-2 文件，优先支持精简 Parquet 缓存。"""
+
+    if path.suffix.lower() == ".parquet":
+        schema_columns = set(pl.scan_parquet(path).collect_schema().names())
+        selected_columns = [column for column in columns if column in schema_columns]
+        return pl.read_parquet(path, columns=selected_columns)
+    return read_csv_auto(path, columns=columns)
+
+
 def build_file_map(directory: Path) -> dict[str, Path]:
     """扫描某日 order/trade 目录，返回 {标准化股票代码: 文件路径}。"""
 
     if not directory.exists():
         return {}
     mapping: dict[str, Path] = {}
-    for path in directory.glob("*.csv*"):
+    for path in directory.iterdir():
+        if not path.is_file():
+            continue
         name = path.name
         if name.endswith(".csv.gz"):
             raw_code = name[:-7]
         elif name.endswith(".csv"):
             raw_code = name[:-4]
+        elif name.endswith(".parquet"):
+            raw_code = name[:-8]
         else:
             continue
         mapping[normalize_stock_code(raw_code)] = path
     return mapping
+
+
+def preferred_level2_file_map(date: str, table: str) -> dict[str, Path]:
+    """优先使用 Parquet 缓存；缓存缺失的股票回退到原始 CSV。"""
+
+    raw_map = build_file_map(config.LEVEL2_DATA_DIR / date / table)
+    cache_map = build_file_map(LEVEL2_PARQUET_CACHE_DIR / date / table)
+    if not cache_map:
+        return raw_map
+
+    merged = dict(raw_map)
+    merged.update(cache_map)
+    return merged
 
 
 def infer_exchange(path: Path | None, df: pl.DataFrame | None) -> str:
@@ -458,8 +518,8 @@ def process_stock_task(task: tuple[str, str, str, str]) -> StockResult:
 
     # 读入该股票当日的原始委托表和逐笔成交/撤单表。
     # order 表用于定义“订单从哪里来”，trade 表用于判断“是否成交/是否撤单”。
-    order_df = read_csv_auto(order_path)
-    trade_df = read_csv_auto(trade_path)
+    order_df = read_level2_table(order_path, columns=ORDER_READ_COLUMNS)
+    trade_df = read_level2_table(trade_path, columns=TRADE_READ_COLUMNS)
     if order_df.is_empty():
         return empty_result(stock_code)
 
@@ -496,53 +556,45 @@ def process_stock_task(task: tuple[str, str, str, str]) -> StockResult:
     tox_30s_count = 0
 
     if not cancel_events.is_empty():
-        # 将主动撤单事件与同一 order_id 的历史成交量合并。
-        # trade_volume > 0 表示该订单先成交过一部分，剩余部分又被撤掉，即部撤。
-        # trade_volume == 0 表示该订单没有成交过就被撤掉，即全撤。
-        cancel_events = (
-            cancel_events.join(trades, on="order_id", how="left")
-            .with_columns(
-                [
-                    pl.col("trade_volume").fill_null(0.0),
-                    segment_expr("cancel_time_ms").alias("segment"),
+        # 三小将的全撤/部撤部分按“撤单发生时间”归入配置的时间段。
+        # 这里先只汇总分类订单量，后面写矩阵时再除以自由流通股本。
+        # 只有命中时间段的撤单才需要匹配历史成交量来区分全撤/部撤；
+        # 毒流动性和废单排除都不依赖这个 join。
+        cancel_segmented = cancel_events.with_columns(segment_expr("cancel_time_ms").alias("segment")).filter(
+            pl.col("segment").is_not_null()
+            & pl.col("direction").is_in(DIRECTIONS)
+            & pl.col("cancel_volume").is_not_null()
+        )
+        if not cancel_segmented.is_empty():
+            grouped = (
+                cancel_segmented.join(trades, on="order_id", how="left")
+                .with_columns(
                     pl.when(pl.col("trade_volume").fill_null(0.0) > 0)
                     .then(pl.lit("part_cancel"))
                     .otherwise(pl.lit("all_cancel"))
-                    .alias("kind"),
-                    (pl.col("cancel_time_ms") - pl.col("orig_time_ms")).alias("delta_ms"),
-                ]
+                    .alias("kind")
+                )
+                .group_by(["direction", "kind", "segment"], maintain_order=False)
+                .agg(pl.col("cancel_volume").sum().alias("volume"))
             )
-        )
-
-        # 三小将的全撤/部撤部分按“撤单发生时间”归入配置的时间段。
-        # 这里先只汇总分类订单量，后面写矩阵时再除以自由流通股本。
-        grouped = (
-            cancel_events.filter(
-                pl.col("segment").is_not_null()
-                & pl.col("direction").is_in(DIRECTIONS)
-                & pl.col("cancel_volume").is_not_null()
-            )
-            .group_by(["direction", "kind", "segment"], maintain_order=False)
-            .agg(pl.col("cancel_volume").sum().alias("volume"))
-        )
-        for row in grouped.iter_rows(named=True):
-            key = f"{row['direction']}_{row['kind']}_rate_{row['segment']}"
-            volumes[key] = float(row["volume"] or 0.0)
+            for row in grouped.iter_rows(named=True):
+                key = f"{row['direction']}_{row['kind']}_rate_{row['segment']}"
+                volumes[key] = float(row["volume"] or 0.0)
 
         # 毒流动性只关心撤单速度：撤单时间 - 原始委托时间。
         # 分子为 5 秒内主动撤单数量，分母为 30 秒内主动撤单数量。
         tox_counts = cancel_events.select(
             [
                 (
-                    (pl.col("delta_ms") >= 0)
-                    & (pl.col("delta_ms") <= 5 * MS_PER_SECOND)
+                    ((pl.col("cancel_time_ms") - pl.col("orig_time_ms")) >= 0)
+                    & ((pl.col("cancel_time_ms") - pl.col("orig_time_ms")) <= 5 * MS_PER_SECOND)
                 )
                 .cast(pl.Int64)
                 .sum()
                 .alias("tox_5"),
                 (
-                    (pl.col("delta_ms") >= 0)
-                    & (pl.col("delta_ms") <= 30 * MS_PER_SECOND)
+                    ((pl.col("cancel_time_ms") - pl.col("orig_time_ms")) >= 0)
+                    & ((pl.col("cancel_time_ms") - pl.col("orig_time_ms")) <= 30 * MS_PER_SECOND)
                 )
                 .cast(pl.Int64)
                 .sum()
@@ -741,9 +793,8 @@ def available_tasks_for_date(
 ) -> list[tuple[str, str, str, str]]:
     """生成某个交易日的股票任务列表，只保留可交易且 order/trade 均存在的股票。"""
 
-    date_dir = config.LEVEL2_DATA_DIR / date
-    order_map = build_file_map(date_dir / "order")
-    trade_map = build_file_map(date_dir / "trade")
+    order_map = preferred_level2_file_map(date, "order")
+    trade_map = preferred_level2_file_map(date, "trade")
     common = sorted(set(order_map) & set(trade_map) & set(ticker_to_idx))
     if stock_filter is not None:
         common = [stock for stock in common if stock in stock_filter]

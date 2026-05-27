@@ -5,6 +5,8 @@
 ## 项目结构
 
 - `build_report_factors.py`: 复现买卖方向三小将因子和毒流动性因子的主入口
+- `run_report_factors_streaming.py`: 逐日生成临时缓存、计算因子、打 tag、删除缓存的自动入口
+- `build_level2_parquet_cache.py`: 将 Level-2 原始 CSV 压缩成精简 Parquet 缓存的底层工具
 - `config.py`: 数据路径、输出路径、时间段和并行参数配置
 - `20240124-开源证券-市场微观结构研究系列（22）：订单流系列，撤单行为规律初探.pdf`: 参考报告
 - `utils/`: 路径、日志、绘图和配色工具
@@ -22,6 +24,20 @@ TIME_SEGMENTS = ALL_7_TIME_SEGMENTS
 ```bash
 python build_report_factors.py --dates 20240226 --stocks 000001,600000 --dry-run --n-jobs 2
 ```
+
+推荐使用流式入口全量运行。脚本会按日期自动生成临时 Parquet 缓存，算完该日期后写入 tag 并删除缓存；下次启动会跳过 tag 及以前的日期：
+
+```bash
+python run_report_factors_streaming.py --n-jobs 8
+```
+
+也可以只测试指定日期或股票：
+
+```bash
+python run_report_factors_streaming.py --dates 20240226 --stocks 000001,600000 --n-jobs 2 --skip-roll
+```
+
+临时缓存固定写入项目目录下的 `cache/level2_parquet/`，无需在 `config.py` 中配置。进度 tag 默认为 `factor_outputs/report_reproduction/streaming_last_completed_date.tag`。
 
 在 PyCharm 里打断点调试时，建议把并行进程数设为 1，并先使用 `--dry-run`：
 

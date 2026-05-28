@@ -23,6 +23,7 @@ import config
 from build_level2_parquet_cache import ConvertResult, build_tasks_for_date, convert_one
 from build_report_factors import (
     LEVEL2_PARQUET_CACHE_DIR,
+    build_file_map,
     build_roll_outputs,
     factor_names,
     load_axes,
@@ -94,10 +95,26 @@ def flush_arrays(arrays: dict[str, np.memmap]) -> None:
         arr.flush()
 
 
-def build_cache_for_date(date: str, stock_filter: set[str] | None, n_jobs: int) -> None:
+def log_date_file_state(date: str) -> None:
+    """输出某个日期原始 Level-2 文件可见性，方便定位缺数据/目录异常。"""
+
+    date_dir = config.LEVEL2_DATA_DIR / date
+    order_dir = date_dir / "order"
+    trade_dir = date_dir / "trade"
+    order_count = len(build_file_map(order_dir))
+    trade_count = len(build_file_map(trade_dir))
+    logger.info(
+        f"{date}: 文件检查 order_dir_exists={order_dir.exists()}, "
+        f"trade_dir_exists={trade_dir.exists()}, order_files={order_count}, trade_files={trade_count}"
+    )
+
+
+def build_cache_for_date(date: str, stock_filter: set[str] | None, n_jobs: int) -> bool:
+    log_date_file_state(date)
     tasks = build_tasks_for_date(date, stock_filter, overwrite=True)
     if not tasks:
-        raise ValueError(f"{date}: 没有找到需要转换的 order/trade 文件")
+        logger.warning(f"{date}: 没有找到需要转换的 order/trade 文件，跳过该日期")
+        return False
 
     workers = max(1, min(int(n_jobs), len(tasks)))
     logger.info(f"{date}: 开始生成临时 Parquet 缓存，files={len(tasks)}, workers={workers}")
@@ -134,6 +151,7 @@ def build_cache_for_date(date: str, stock_filter: set[str] | None, n_jobs: int) 
         logger.error(f"{date} {failure.table} {failure.stock_code}: {failure.message}")
     if failures:
         raise RuntimeError(f"{date}: 存在 {len(failures)} 个文件转换失败")
+    return True
 
 
 def delete_cache_for_date(date: str) -> None:
@@ -160,15 +178,23 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    logger.info(
+        f"启动参数：dates={args.dates or 'ALL'}, stocks={args.stocks or 'ALL'}, "
+        f"n_jobs={args.n_jobs}, tag_path={args.tag_path}, skip_roll={args.skip_roll}, "
+        f"force_from={args.force_from}, dry_run={args.dry_run}"
+    )
+
     requested_dates = parse_csv_arg(args.dates)
     requested_stocks = parse_csv_arg(args.stocks)
     if requested_stocks is not None:
         requested_stocks = {normalize_stock_code(stock) for stock in requested_stocks}
 
+    logger.info("读取 EOD/基本面轴文件并校验形状")
     tickers, dates_axis, ticker_to_idx, date_to_idx = load_axes()
     validate_axes(tickers, dates_axis)
     shape = (len(tickers), len(dates_axis))
     names = factor_names()
+    logger.info(f"轴信息读取完成：shape={shape}, factors={len(names)}")
 
     last_completed = read_tag(args.tag_path)
     if args.force_from:
@@ -179,11 +205,23 @@ def main() -> None:
     else:
         force_from = None
 
-    process_dates = [date for date in scan_dates(requested_dates) if date in date_to_idx]
+    logger.info(f"扫描 Level-2 日期目录：root={config.LEVEL2_DATA_DIR}")
+    scanned_dates = scan_dates(requested_dates)
+    logger.info(f"扫描完成：level2_dates={len(scanned_dates)}, sample={scanned_dates[:5]}")
+
+    missing_axis_dates = [date for date in scanned_dates if date not in date_to_idx]
+    process_dates = [date for date in scanned_dates if date in date_to_idx]
+    if missing_axis_dates:
+        logger.warning(f"有 {len(missing_axis_dates)} 个 Level-2 日期不在 EOD 日期轴中，已跳过，sample={missing_axis_dates[:5]}")
+
     if force_from is not None:
+        before = len(process_dates)
         process_dates = [date for date in process_dates if date >= force_from]
+        logger.info(f"按 --force-from={force_from} 过滤日期：{before} -> {len(process_dates)}")
     elif last_completed is not None:
+        before = len(process_dates)
         process_dates = [date for date in process_dates if date > last_completed]
+        logger.info(f"按 tag={last_completed} 过滤日期：{before} -> {len(process_dates)}")
 
     if not process_dates:
         logger.info(f"没有需要处理的新日期，tag={last_completed}, tag_path={args.tag_path}")
@@ -198,15 +236,24 @@ def main() -> None:
         return
 
     raw_dir = config.REPORT_FACTOR_OUTPUT_DIR / "raw"
+    logger.info(f"打开/创建 raw 因子矩阵：dir={raw_dir}")
     arrays = open_or_create_raw_memmaps(names, shape, raw_dir)
+    logger.info("raw 因子矩阵准备完成")
+    logger.info("加载 tradable/free_float mmap")
     tradable = np.load(config.TRADABLE_NPY_PATH, mmap_mode="r")
     free_float = np.load(config.FREE_FLOAT_SHARES_NPY_PATH, mmap_mode="r")
+    logger.info("tradable/free_float mmap 加载完成")
 
     try:
-        for date in process_dates:
+        total_dates = len(process_dates)
+        for date_no, date in enumerate(process_dates, start=1):
             date_idx = date_to_idx[date]
-            logger.info(f"{date}: 开始流式处理")
-            build_cache_for_date(date, requested_stocks, args.n_jobs)
+            logger.info(f"{date}: 开始流式处理 ({date_no}/{total_dates})")
+            has_cache = build_cache_for_date(date, requested_stocks, args.n_jobs)
+            if not has_cache:
+                write_tag(args.tag_path, date)
+                logger.info(f"{date}: 无可用 Level-2 文件，已写入 tag 并跳过 ({date_no}/{total_dates})")
+                continue
             process_date(
                 date=date,
                 date_idx=date_idx,
@@ -222,7 +269,7 @@ def main() -> None:
             write_tag(args.tag_path, date)
             logger.info(f"{date}: 已写入 tag {args.tag_path}")
             delete_cache_for_date(date)
-            logger.info(f"{date}: 完成流式处理")
+            logger.info(f"{date}: 完成流式处理 ({date_no}/{total_dates})")
     finally:
         flush_arrays(arrays)
         del arrays

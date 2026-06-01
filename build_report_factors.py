@@ -204,11 +204,21 @@ def read_level2_table(path: Path, columns: list[str]) -> pl.DataFrame:
 def build_file_map(directory: Path) -> dict[str, Path]:
     """扫描某日 order/trade 目录，返回 {标准化股票代码: 文件路径}。"""
 
-    if not directory.exists():
+    try:
+        if not directory.exists():
+            return {}
+        paths = list(directory.iterdir())
+    except PermissionError as exc:
+        logger.warning(f"无权限访问目录，跳过：{directory} ({exc})")
         return {}
+
     mapping: dict[str, Path] = {}
-    for path in directory.iterdir():
-        if not path.is_file():
+    for path in paths:
+        try:
+            if not path.is_file():
+                continue
+        except PermissionError as exc:
+            logger.warning(f"无权限访问文件，跳过：{path} ({exc})")
             continue
         name = path.name
         if name.endswith(".csv.gz"):
@@ -513,13 +523,19 @@ def process_stock_task(task: tuple[str, str, str, str]) -> StockResult:
 
     # 单股文件缺失时直接返回空结果。这里不抛异常，是为了全市场并行时
     # 个别股票问题不影响整个交易日继续处理。
-    if not order_path.exists() or not trade_path.exists():
+    try:
+        if not order_path.exists() or not trade_path.exists():
+            return empty_result(stock_code)
+    except PermissionError:
         return empty_result(stock_code)
 
     # 读入该股票当日的原始委托表和逐笔成交/撤单表。
     # order 表用于定义“订单从哪里来”，trade 表用于判断“是否成交/是否撤单”。
-    order_df = read_level2_table(order_path, columns=ORDER_READ_COLUMNS)
-    trade_df = read_level2_table(trade_path, columns=TRADE_READ_COLUMNS)
+    try:
+        order_df = read_level2_table(order_path, columns=ORDER_READ_COLUMNS)
+        trade_df = read_level2_table(trade_path, columns=TRADE_READ_COLUMNS)
+    except PermissionError:
+        return empty_result(stock_code)
     if order_df.is_empty():
         return empty_result(stock_code)
 
@@ -698,17 +714,25 @@ def scan_dates(date_filter: set[str] | None = None) -> list[str]:
     if not config.LEVEL2_DATA_DIR.exists():
         raise FileNotFoundError(f"Level-2 数据目录不存在：{config.LEVEL2_DATA_DIR}")
     dates: list[str] = []
-    for path in config.LEVEL2_DATA_DIR.iterdir():
-        if not path.is_dir() or not path.name.isdigit() or len(path.name) != 8:
-            continue
-        if date_filter is not None and path.name not in date_filter:
-            continue
-        if config.START_DATE and path.name < config.START_DATE:
-            continue
-        if config.END_DATE and path.name > config.END_DATE:
-            continue
-        if (path / "order").exists() and (path / "trade").exists():
-            dates.append(path.name)
+    try:
+        date_dirs = list(config.LEVEL2_DATA_DIR.iterdir())
+    except PermissionError as exc:
+        raise PermissionError(f"无权限访问 Level-2 根目录：{config.LEVEL2_DATA_DIR}") from exc
+
+    for path in date_dirs:
+        try:
+            if not path.is_dir() or not path.name.isdigit() or len(path.name) != 8:
+                continue
+            if date_filter is not None and path.name not in date_filter:
+                continue
+            if config.START_DATE and path.name < config.START_DATE:
+                continue
+            if config.END_DATE and path.name > config.END_DATE:
+                continue
+            if (path / "order").exists() and (path / "trade").exists():
+                dates.append(path.name)
+        except PermissionError as exc:
+            logger.warning(f"无权限访问日期目录，跳过：{path} ({exc})")
     return sorted(dates)
 
 
@@ -917,7 +941,12 @@ def process_date(
                 desc=f"{date} 股票处理",
                 dynamic_ncols=True,
             ):
-                result = future.result()
+                try:
+                    result = future.result()
+                except PermissionError as exc:
+                    task = future_map[future]
+                    logger.warning(f"{date} {task[0]}: 无权限读取文件，跳过该股票 ({exc})")
+                    result = empty_result(task[0])
                 results.append(result)
                 if arrays is not None:
                     write_result_to_raw(result, date_idx, ticker_to_idx, free_float, arrays)

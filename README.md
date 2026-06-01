@@ -286,17 +286,20 @@ volumes["buy_all_cancel_rate_auction1_0915_0920"]
 
 废单不来自 `cancel_events`，而是在后续的 `negative_orders` 中单独按 `orig_time_ms` 归属时间段后写入同一个 `volumes` 字典。
 
-每个时间段还会生成 2 个合成因子：
+每个时间段还会生成 2 个方向内合成因子：
 
 - `buy_tri_{segment}`
 - `sell_tri_{segment}`
 
-合成方式是三类原始因子等权平均：
+`buy_tri` 和 `sell_tri` 是单方向内三类原始因子的等权平均：
 
 ```text
 buy_tri = mean(buy_all_cancel_rate, buy_part_cancel_rate, buy_negative_rate)
 sell_tri = mean(sell_all_cancel_rate, sell_part_cancel_rate, sell_negative_rate)
 ```
+
+研报“三小将_TRI”原文使用“三类卖方撤单率指标”等权合成，因此严格复现口径对应 `sell_tri_{segment}`。
+`buy_tri_{segment}` 是额外保留的买方同构诊断因子，便于观察买卖不对称。
 
 ### 10. 计算毒流动性因子
 
@@ -384,6 +387,7 @@ raw 因子写完后，脚本会生成：
 ```
 
 例如 `sell_tri_auction1_0915_0920.npy` 是卖出方向全撤、部撤、废单三个原始因子的等权平均。
+这也是研报“三小将_TRI”的严格复现口径。
 
 `tox_5s_over_30s.npy` 不按方向和时间段拆分，表示全日主动撤单中 5 秒内撤单数量除以 30 秒内撤单数量。
 

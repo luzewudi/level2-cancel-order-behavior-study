@@ -103,9 +103,17 @@ def log_date_file_state(date: str) -> None:
     trade_dir = date_dir / "trade"
     order_count = len(build_file_map(order_dir))
     trade_count = len(build_file_map(trade_dir))
+    try:
+        order_exists = order_dir.exists()
+    except PermissionError:
+        order_exists = False
+    try:
+        trade_exists = trade_dir.exists()
+    except PermissionError:
+        trade_exists = False
     logger.info(
-        f"{date}: 文件检查 order_dir_exists={order_dir.exists()}, "
-        f"trade_dir_exists={trade_dir.exists()}, order_files={order_count}, trade_files={trade_count}"
+        f"{date}: 文件检查 order_dir_exists={order_exists}, "
+        f"trade_dir_exists={trade_exists}, order_files={order_count}, trade_files={trade_count}"
     )
 
 
@@ -121,6 +129,7 @@ def build_cache_for_date(date: str, stock_filter: set[str] | None, n_jobs: int) 
 
     failures: list[ConvertResult] = []
     converted = 0
+    skipped_permission = 0
     rows = 0
     if workers == 1:
         iterator = (convert_one(task) for task in tasks)
@@ -129,6 +138,7 @@ def build_cache_for_date(date: str, stock_filter: set[str] | None, n_jobs: int) 
                 failures.append(result)
             else:
                 converted += int(result.status == "converted")
+                skipped_permission += int(result.status == "skipped_permission")
                 rows += result.rows
     else:
         with ProcessPoolExecutor(max_workers=workers) as executor:
@@ -144,9 +154,13 @@ def build_cache_for_date(date: str, stock_filter: set[str] | None, n_jobs: int) 
                     failures.append(result)
                 else:
                     converted += int(result.status == "converted")
+                    skipped_permission += int(result.status == "skipped_permission")
                     rows += result.rows
 
-    logger.info(f"{date}: 临时缓存完成，converted={converted}, failed={len(failures)}, rows={rows}")
+    logger.info(
+        f"{date}: 临时缓存完成，converted={converted}, "
+        f"skipped_permission={skipped_permission}, failed={len(failures)}, rows={rows}"
+    )
     for failure in failures[:20]:
         logger.error(f"{date} {failure.table} {failure.stock_code}: {failure.message}")
     if failures:

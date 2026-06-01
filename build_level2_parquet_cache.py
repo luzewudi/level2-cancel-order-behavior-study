@@ -102,6 +102,17 @@ def convert_one(task: ConvertTask) -> ConvertResult:
             source_path=task.source_path,
             target_path=task.target_path,
         )
+    except PermissionError as exc:
+        return ConvertResult(
+            table=task.table,
+            date=task.date,
+            stock_code=task.stock_code,
+            status="skipped_permission",
+            rows=0,
+            source_path=task.source_path,
+            target_path=task.target_path,
+            message=str(exc),
+        )
     except Exception as exc:  # noqa: PERF203
         return ConvertResult(
             table=task.table,
@@ -118,12 +129,17 @@ def convert_one(task: ConvertTask) -> ConvertResult:
 def build_tasks_for_date(date: str, stock_filter: set[str] | None, overwrite: bool) -> list[ConvertTask]:
     tasks: list[ConvertTask] = []
     cache_root = LEVEL2_PARQUET_CACHE_DIR / date
+    raw_maps = {
+        "order": build_file_map(config.LEVEL2_DATA_DIR / date / "order"),
+        "trade": build_file_map(config.LEVEL2_DATA_DIR / date / "trade"),
+    }
+    common = sorted(set(raw_maps["order"]) & set(raw_maps["trade"]))
+    if stock_filter is not None:
+        common = [stock_code for stock_code in common if stock_code in stock_filter]
 
-    for table, columns in (("order", ORDER_READ_COLUMNS), ("trade", TRADE_READ_COLUMNS)):
-        raw_map = build_file_map(config.LEVEL2_DATA_DIR / date / table)
-        for stock_code, source_path in sorted(raw_map.items()):
-            if stock_filter is not None and stock_code not in stock_filter:
-                continue
+    for stock_code in common:
+        for table, columns in (("order", ORDER_READ_COLUMNS), ("trade", TRADE_READ_COLUMNS)):
+            source_path = raw_maps[table][stock_code]
             target_path = cache_root / table / f"{cache_stem(source_path)}.parquet"
             tasks.append(
                 ConvertTask(
@@ -171,14 +187,14 @@ def main() -> None:
         f"workers={workers}, cache_dir={LEVEL2_PARQUET_CACHE_DIR}"
     )
 
-    counts = {"converted": 0, "skipped": 0, "failed": 0}
+    counts = {"converted": 0, "skipped": 0, "skipped_permission": 0, "failed": 0}
     rows = 0
     failures: list[ConvertResult] = []
 
     if workers == 1:
         iterator = (convert_one(task) for task in all_tasks)
         for result in tqdm(iterator, total=len(all_tasks), desc="转换 Parquet", dynamic_ncols=True):
-            counts[result.status] += 1
+            counts[result.status] = counts.get(result.status, 0) + 1
             rows += result.rows
             if result.status == "failed":
                 failures.append(result)
@@ -192,14 +208,15 @@ def main() -> None:
                 dynamic_ncols=True,
             ):
                 result = future.result()
-                counts[result.status] += 1
+                counts[result.status] = counts.get(result.status, 0) + 1
                 rows += result.rows
                 if result.status == "failed":
                     failures.append(result)
 
     logger.info(
         f"Parquet 缓存构建完成：converted={counts['converted']}, "
-        f"skipped={counts['skipped']}, failed={counts['failed']}, rows={rows}"
+        f"skipped={counts['skipped']}, skipped_permission={counts['skipped_permission']}, "
+        f"failed={counts['failed']}, rows={rows}"
     )
     for failure in failures[:20]:
         logger.error(f"{failure.date} {failure.table} {failure.stock_code}: {failure.message}")

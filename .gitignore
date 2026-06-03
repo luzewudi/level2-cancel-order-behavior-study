@@ -36,3 +36,5 @@ cancel_minute_stock_tmp/
 *.npy
 *.npz
 草稿/
+复现总结/
+figures/
